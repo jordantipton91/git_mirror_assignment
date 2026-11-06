@@ -1,0 +1,114 @@
+{{- if not .Values.source.url }}
+{{- fail "source.url is required" }}
+{{- end }}
+{{- $name := include "git-mirror.fullname" . }}
+{{- $image := printf "%s:%s" .Values.image.repository .Values.image.tag }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "git-mirror.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "git-mirror.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "git-mirror.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/scripts: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: clone
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/scripts/clone.sh"]
+          env:
+            {{- include "git-mirror.gitEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.sync | nindent 12 }}
+          securityContext:
+            {{- include "git-mirror.securityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: scripts
+              mountPath: /scripts
+      containers:
+        - name: sync
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/scripts/sync.sh"]
+          env:
+            {{- include "git-mirror.gitEnv" . | nindent 12 }}
+            - name: SYNC_INTERVAL
+              value: {{ .Values.syncIntervalSeconds | quote }}
+            - name: MAX_SYNC_AGE
+              value: {{ .Values.maxSyncAgeSeconds | quote }}
+          livenessProbe:
+            exec:
+              command: ["/scripts/healthy.sh"]
+            periodSeconds: 60
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources.sync | nindent 12 }}
+          securityContext:
+            {{- include "git-mirror.securityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: scripts
+              mountPath: /scripts
+        - name: daemon
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - git
+            - daemon
+            - --reuseaddr
+            - --export-all
+            - --informative-errors
+            - --verbose
+            - --listen=0.0.0.0
+            - --port=9418
+            - --max-connections={{ .Values.maxConnections }}
+            - --base-path=/data
+            - /data
+          ports:
+            - name: git
+              containerPort: 9418
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/data/{{ .Values.repoName }}.git/HEAD"]
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: git
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.daemon | nindent 12 }}
+          securityContext:
+            {{- include "git-mirror.securityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-data
+        - name: scripts
+          configMap:
+            name: {{ $name }}-scripts
+            defaultMode: 0555

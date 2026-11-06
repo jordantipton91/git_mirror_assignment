@@ -1,0 +1,7 @@
+Mirror of {{ .Values.source.url }}
+
+Clone from inside the cluster:
+  git clone git://{{ include "git-mirror.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/{{ .Values.repoName }}.git
+
+Watch sync logs:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "git-mirror.fullname" . }} -c sync -f

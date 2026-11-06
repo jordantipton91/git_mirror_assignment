@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "git-mirror.fullname" . }}-scripts
+  labels:
+    {{- include "git-mirror.labels" . | nindent 4 }}
+data:
+  askpass.sh: |
+    #!/bin/sh
+    case "$1" in
+      Username*) echo "$GIT_USERNAME" ;;
+      *) echo "$GIT_TOKEN" ;;
+    esac
+
+  clone.sh: |
+    #!/bin/sh
+    set -eu
+    REPO="/data/${REPO_NAME}.git"
+    if [ -f "$REPO/HEAD" ]; then
+      echo "mirror already exists at $REPO"
+      exit 0
+    fi
+    attempt=1
+    until git clone --mirror "$SOURCE_URL" "$REPO.tmp"; do
+      rm -rf "$REPO.tmp"
+      if [ "$attempt" -ge 5 ]; then
+        echo "clone failed after $attempt attempts"
+        exit 1
+      fi
+      echo "clone attempt $attempt failed, retrying in 10s"
+      attempt=$((attempt + 1))
+      sleep 10
+    done
+    echo "packing with bitmap index"
+    git -C "$REPO.tmp" gc --quiet
+    mv "$REPO.tmp" "$REPO"
+    echo "clone done"
+
+  sync.sh: |
+    #!/bin/sh
+    set -u
+    REPO="/data/${REPO_NAME}.git"
+    git -C "$REPO" remote set-url origin "$SOURCE_URL"
+    date +%s > /tmp/last-sync
+    while true; do
+      if git -C "$REPO" fetch --prune --quiet origin; then
+        date +%s > /tmp/last-sync
+        echo "$(date -u +%FT%TZ) synced $(git -C "$REPO" rev-parse --short HEAD)"
+      else
+        echo "$(date -u +%FT%TZ) sync failed"
+      fi
+      sleep "$SYNC_INTERVAL"
+    done
+
+  healthy.sh: |
+    #!/bin/sh
+    last=$(cat /tmp/last-sync 2>/dev/null || echo 0)
+    [ $(( $(date +%s) - last )) -lt "$MAX_SYNC_AGE" ]
